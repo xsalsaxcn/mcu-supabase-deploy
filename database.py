@@ -33,10 +33,6 @@ POSTGRES_ID_TABLES = {
 
 
 def get_supabase_db_url():
-    """
-    Ambil Supabase PostgreSQL connection string dari Streamlit Secrets
-    atau environment variable.
-    """
     try:
         if "SUPABASE_DB_URL" in st.secrets:
             return str(st.secrets["SUPABASE_DB_URL"]).strip()
@@ -57,12 +53,6 @@ def using_postgres():
 
 
 class PgCursorAdapter:
-    """
-    Adapter supaya query lama gaya SQLite tetap bisa jalan di PostgreSQL/Supabase:
-    - ? diganti %s
-    - INSERT OR IGNORE diganti ON CONFLICT DO NOTHING
-    - lastrowid diisi dari RETURNING id untuk tabel yang punya id serial
-    """
     def __init__(self, cursor):
         self.cursor = cursor
         self.lastrowid = None
@@ -169,21 +159,12 @@ class PgConnectionAdapter:
 
 
 def get_connection():
-    """
-    Dipakai oleh capaska_importer.py dan modul lama lain.
-
-    Kalau SUPABASE_DB_URL ada di Streamlit Secrets:
-        pakai Supabase PostgreSQL.
-    Kalau tidak:
-        fallback ke SQLite lokal mcu.db.
-    """
     if using_postgres():
         if not POSTGRES_AVAILABLE:
             raise RuntimeError(
                 "psycopg2-binary belum terinstall. "
                 "Tambahkan psycopg2-binary ke requirements.txt."
             )
-
         return PgConnectionAdapter(get_supabase_db_url())
 
     conn = sqlite3.connect(DB_PATH)
