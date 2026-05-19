@@ -1574,6 +1574,70 @@ def get_packages(program_type=None):
     return [dict(row) for row in rows]
 
 
+
+def get_or_create_company_id(name, address="", pic_name=""):
+    clean_name = safe_strip(name) or "BPIP / CAPASKA"
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT id
+    FROM companies
+    WHERE LOWER(name) = LOWER(?)
+    LIMIT 1
+    """, (clean_name,))
+
+    existing = cur.fetchone()
+
+    if existing:
+        conn.close()
+        return existing["id"]
+
+    cur.execute("""
+    INSERT INTO companies (name, address, pic_name)
+    VALUES (?, ?, ?)
+    """, (clean_name, address, pic_name))
+
+    company_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    return company_id
+
+
+def get_or_create_package_id(name, company_id, program_type=PROGRAM_CAPASKA, description="Auto created from import database"):
+    clean_name = safe_strip(name) or "CAPASKA 2025/2026"
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+    SELECT id
+    FROM packages
+    WHERE LOWER(name) = LOWER(?)
+      AND program_type = ?
+    LIMIT 1
+    """, (clean_name, program_type))
+
+    existing = cur.fetchone()
+
+    if existing:
+        conn.close()
+        return existing["id"]
+
+    cur.execute("""
+    INSERT INTO packages (name, description, company_id, is_active, program_type)
+    VALUES (?, ?, ?, 1, ?)
+    """, (clean_name, description, company_id, program_type))
+
+    package_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    return package_id
+
+
 def get_posts(program_type=None, include_admin=False):
     conn = get_connection()
     cur = conn.cursor()
@@ -5861,113 +5925,157 @@ if menu == "Import CAPASKA":
         companies = get_companies()
         packages = get_packages(program_type=PROGRAM_CAPASKA)
 
-        if not companies:
-            st.warning("Belum ada instansi/perusahaan. Tambahkan dulu di Master Data.")
-        elif not packages:
-            st.warning("Belum ada paket CAPASKA. Tambahkan dulu paket CAPASKA.")
-        else:
-            company_options = {
-                company["name"]: company["id"]
-                for company in companies
-            }
+        st.info(
+            "Import ini fleksibel dan otomatis deteksi header. "
+            "Tidak wajib memakai template. Minimal file memiliki kolom nama peserta, misalnya: "
+            "Nama Peserta, Nama Lengkap, Nama, Peserta, Putra, atau Putri."
+        )
 
-            package_options = {
-                package["name"]: package["id"]
-                for package in packages
-            }
+        company_options = {
+            f"Pakai existing: {company['name']}": company['id']
+            for company in companies
+        }
 
-            with st.form("import_instansi_database_form"):
-                database_name = st.text_input(
-                    "Nama Database",
-                    placeholder="Contoh: CAPASKA BPIP 26 Juni 2025"
-                )
+        package_options = {
+            f"Pakai existing: {package['name']}": package['id']
+            for package in packages
+        }
 
-                institution_name = st.text_input(
-                    "Nama Instansi",
-                    value="BPIP / CAPASKA"
-                )
+        with st.form("import_instansi_database_form"):
+            database_name = st.text_input(
+                "Nama Database",
+                placeholder="Contoh: CAPASKA BPIP 26 Juni 2025"
+            )
 
-                selected_company = st.selectbox(
+            institution_name = st.text_input(
+                "Nama Instansi / Database Source",
+                value="BPIP / CAPASKA",
+                help="Nama ini akan muncul di dropdown operator: Pilih Database Instansi."
+            )
+
+            st.markdown("#### Mapping Database")
+
+            if company_options:
+                selected_company_label = st.selectbox(
                     "Instansi / Perusahaan Tujuan",
-                    list(company_options.keys())
+                    ["Buat otomatis dari nama instansi"] + list(company_options.keys()),
+                    index=0,
+                    help="Pilih existing jika sudah ada, atau biarkan otomatis agar sistem membuat master data."
                 )
+            else:
+                selected_company_label = "Buat otomatis dari nama instansi"
+                st.caption("Belum ada master perusahaan. Sistem akan membuat otomatis dari Nama Instansi.")
 
-                selected_package = st.selectbox(
+            company_name_for_create = st.text_input(
+                "Nama Perusahaan/Instansi jika dibuat otomatis",
+                value="BPIP / CAPASKA"
+            )
+
+            if package_options:
+                selected_package_label = st.selectbox(
                     "Paket Pemeriksaan",
-                    list(package_options.keys())
+                    ["Buat otomatis dari nama paket"] + list(package_options.keys()),
+                    index=0,
+                    help="Pilih existing jika sudah ada, atau biarkan otomatis agar sistem membuat paket."
                 )
+            else:
+                selected_package_label = "Buat otomatis dari nama paket"
+                st.caption("Belum ada master paket CAPASKA. Sistem akan membuat otomatis.")
 
-                description = st.text_area(
-                    "Catatan Database",
-                    placeholder="Opsional. Contoh: database peserta sesi pemeriksaan tanggal 26 Juni 2025"
-                )
+            package_name_for_create = st.text_input(
+                "Nama Paket jika dibuat otomatis",
+                value="CAPASKA 2025/2026"
+            )
 
-                uploaded_database_file = st.file_uploader(
-                    "Upload Excel Database Peserta Instansi",
-                    type=["xlsx"],
-                    key="instansi_database_upload"
-                )
+            description = st.text_area(
+                "Catatan Database",
+                placeholder="Opsional. Contoh: database peserta sesi pemeriksaan tanggal 26 Juni 2025"
+            )
 
-                import_database_clicked = st.form_submit_button(
-                    "Import Database Peserta"
-                )
+            uploaded_database_file = st.file_uploader(
+                "Upload Excel Database Peserta Instansi",
+                type=["xlsx", "xls"],
+                key="instansi_database_upload",
+                help="Template tidak wajib. Sistem akan auto-detect header dari file Excel."
+            )
 
-            if import_database_clicked:
-                if not database_name.strip():
-                    st.error("Nama Database wajib diisi.")
-                elif uploaded_database_file is None:
-                    st.error("Upload file Excel terlebih dahulu.")
-                else:
-                    try:
-                        with st.spinner("Sedang import database peserta instansi..."):
-                            stats = import_instansi_excel(
-                                uploaded_file=uploaded_database_file,
-                                database_name=database_name.strip(),
-                                institution_name=institution_name.strip(),
-                                package_id=package_options[selected_package],
-                                company_id=company_options[selected_company],
-                                description=description.strip()
-                            )
+            import_database_clicked = st.form_submit_button(
+                "Import Database Peserta"
+            )
 
-                        ensure_runtime_schema()
-
-                        if stats.get("participants_created", 0) == 0 and stats.get("participants_updated", 0) == 0:
-                            st.warning(
-                                f"Database dibuat: {database_name.strip()}, tetapi belum ada peserta yang berhasil diimport. "
-                                "Cek detail detected_columns untuk melihat kolom nama yang terbaca."
-                            )
+        if import_database_clicked:
+            if not database_name.strip():
+                st.error("Nama Database wajib diisi.")
+            elif uploaded_database_file is None:
+                st.error("Upload file Excel terlebih dahulu.")
+            else:
+                try:
+                    with st.spinner("Menyiapkan master data dan import database peserta..."):
+                        if selected_company_label.startswith("Pakai existing:"):
+                            company_id = company_options[selected_company_label]
                         else:
-                            st.success(
-                                f"Database peserta berhasil dibuat: {database_name.strip()}"
+                            company_id = get_or_create_company_id(
+                                company_name_for_create.strip() or institution_name.strip() or "BPIP / CAPASKA"
                             )
 
-                        col1, col2, col3 = st.columns(3)
+                        if selected_package_label.startswith("Pakai existing:"):
+                            package_id = package_options[selected_package_label]
+                        else:
+                            package_id = get_or_create_package_id(
+                                package_name_for_create.strip() or "CAPASKA 2025/2026",
+                                company_id=company_id,
+                                program_type=PROGRAM_CAPASKA
+                            )
 
-                        with col1:
-                            st.metric("Source ID", stats.get("source_id", "-"))
-                            st.metric("Rows Dibaca", stats.get("rows_read", 0))
+                        stats = import_instansi_excel(
+                            uploaded_file=uploaded_database_file,
+                            database_name=database_name.strip(),
+                            institution_name=institution_name.strip() or company_name_for_create.strip() or "BPIP / CAPASKA",
+                            package_id=package_id,
+                            company_id=company_id,
+                            description=description.strip()
+                        )
 
-                        with col2:
-                            st.metric("Peserta Baru", stats.get("participants_created", 0))
-                            st.metric("Peserta Update", stats.get("participants_updated", 0))
+                    ensure_runtime_schema()
 
-                        with col3:
-                            st.metric("Peserta Skip", stats.get("participants_skipped", 0))
+                    if stats.get("participants_created", 0) == 0 and stats.get("participants_updated", 0) == 0:
+                        st.warning(
+                            f"Database dibuat: {database_name.strip()}, tetapi belum ada peserta yang berhasil diimport. "
+                            "Cek detail detected_columns untuk melihat kolom nama yang terbaca."
+                        )
+                    else:
+                        st.success(
+                            f"Database peserta berhasil dibuat: {database_name.strip()}"
+                        )
 
+                    col1, col2, col3 = st.columns(3)
+
+                    with col1:
+                        st.metric("Source ID", stats.get("source_id", "-"))
+                        st.metric("Rows Dibaca", stats.get("rows_read", 0))
+
+                    with col2:
+                        st.metric("Peserta Baru", stats.get("participants_created", 0))
+                        st.metric("Peserta Update", stats.get("participants_updated", 0))
+
+                    with col3:
+                        st.metric("Peserta Skip", stats.get("participants_skipped", 0))
+
+                    with st.expander("Detail hasil import / detected columns", expanded=False):
                         st.json(stats)
 
-                        st.info(
-                            "Sekarang operator bisa buka menu Input CAPASKA, lalu pilih database ini di field Pilih Database Instansi."
-                        )
+                    st.info(
+                        "Sekarang operator bisa buka menu Input CAPASKA, lalu pilih database ini di field Pilih Database Instansi."
+                    )
 
-                    except Exception as e:
-                        st.error("Gagal import database peserta instansi.")
-                        st.warning(
-                            "Format minimal wajib memiliki kolom nama peserta. "
-                            "Contoh header yang didukung: Nama Peserta, Nama Lengkap, Nama, Peserta, Putra, atau Putri. "
-                            "Kolom lain seperti Jenis Kelamin, Provinsi, Tanggal Layanan, Dokter, dan Perawat bersifat opsional."
-                        )
-                        st.exception(e)
+                except Exception as e:
+                    st.error("Gagal import database peserta instansi.")
+                    st.warning(
+                        "Format minimal wajib memiliki kolom nama peserta. "
+                        "Contoh header yang didukung: Nama Peserta, Nama Lengkap, Nama, Peserta, Putra, atau Putri. "
+                        "Kolom lain seperti Jenis Kelamin, Provinsi, Tanggal Layanan, Dokter, dan Perawat bersifat opsional."
+                    )
+                    st.exception(e)
 
 
 def count_export_participants(company_id=None, package_id=None, program_type=None, source_id=None, mcu_date_from=None, mcu_date_to=None):
