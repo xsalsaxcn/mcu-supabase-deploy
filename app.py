@@ -1263,6 +1263,285 @@ def ensure_runtime_schema():
     """)
     cur.execute("UPDATE users SET program_type = 'all' WHERE role = 'admin' OR username = 'admin'")
 
+
+    # =========================
+    # DEFAULT CAPASKA WORKFLOW
+    # =========================
+    # Pastikan semua post pemeriksaan CAPASKA, operator, parameter minimal,
+    # dan mapping package_parameters tersedia.
+    # Ini penting untuk:
+    # - akun operator lengkap muncul di Master Data > User / Operator
+    # - setiap operator hanya melihat parameter sesuai post-nya
+    # - progress stage tetap muncul seperti versi lokal sebelumnya
+
+    capaska_stage_defs = [
+        {
+            "post_name": "Registrasi CAPASKA",
+            "description": "Registrasi dan verifikasi identitas peserta CAPASKA",
+            "username": "capaska_registrasi",
+            "password": "registrasi123",
+            "operator_name": "Operator CAPASKA Registrasi",
+            "parameter_name": "Status Registrasi CAPASKA",
+            "sort_order": 10,
+        },
+        {
+            "post_name": "Kesehatan Mata",
+            "description": "Input pemeriksaan kesehatan mata CAPASKA",
+            "username": "capaska_mata",
+            "password": "mata123",
+            "operator_name": "Operator CAPASKA Mata",
+            "parameter_name": "Status Pemeriksaan Mata",
+            "sort_order": 20,
+        },
+        {
+            "post_name": "Penyakit Dalam",
+            "description": "Input pemeriksaan penyakit dalam CAPASKA",
+            "username": "capaska_pd",
+            "password": "pd123",
+            "operator_name": "Operator CAPASKA Penyakit Dalam",
+            "parameter_name": "Status Pemeriksaan Penyakit Dalam",
+            "sort_order": 30,
+        },
+        {
+            "post_name": "Kesehatan Gigi & Mulut + Dental panoramik",
+            "description": "Input pemeriksaan kesehatan gigi, mulut, dan dental panoramik CAPASKA",
+            "username": "capaska_gigi",
+            "password": "gigi123",
+            "operator_name": "Operator CAPASKA Gigi",
+            "parameter_name": "Status Pemeriksaan Gigi & Mulut",
+            "sort_order": 40,
+        },
+        {
+            "post_name": "Kesehatan THT",
+            "description": "Input pemeriksaan THT CAPASKA",
+            "username": "capaska_tht",
+            "password": "tht123",
+            "operator_name": "Operator CAPASKA THT",
+            "parameter_name": "Status Pemeriksaan THT",
+            "sort_order": 50,
+        },
+        {
+            "post_name": "Kesehatan Jantung dan Pembuluh Darah",
+            "description": "Input pemeriksaan kesehatan jantung dan pembuluh darah CAPASKA",
+            "username": "capaska_jantung",
+            "password": "jantung123",
+            "operator_name": "Operator CAPASKA Jantung",
+            "parameter_name": "Status Pemeriksaan Jantung dan Pembuluh Darah",
+            "sort_order": 60,
+        },
+        {
+            "post_name": "Ortopedi",
+            "description": "Input pemeriksaan ortopedi CAPASKA",
+            "username": "capaska_ortopedi",
+            "password": "ortopedi123",
+            "operator_name": "Operator CAPASKA Ortopedi",
+            "parameter_name": "Status Pemeriksaan Ortopedi",
+            "sort_order": 70,
+        },
+        {
+            "post_name": "Radiologi",
+            "description": "Input pemeriksaan radiologi CAPASKA",
+            "username": "capaska_radiologi",
+            "password": "radiologi123",
+            "operator_name": "Operator CAPASKA Radiologi",
+            "parameter_name": "Status Pemeriksaan Radiologi",
+            "sort_order": 80,
+        },
+    ]
+
+    capaska_post_ids = []
+    capaska_parameter_ids = []
+
+    for stage in capaska_stage_defs:
+        cur.execute("""
+        SELECT id
+        FROM posts
+        WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))
+        LIMIT 1
+        """, (stage["post_name"],))
+        post_row = cur.fetchone()
+
+        if post_row:
+            post_id = post_row["id"]
+            cur.execute("""
+            UPDATE posts
+            SET description = COALESCE(NULLIF(description, ''), ?),
+                program_type = ?,
+                is_active = 1
+            WHERE id = ?
+            """, (
+                stage["description"],
+                PROGRAM_CAPASKA,
+                post_id
+            ))
+        else:
+            cur.execute("""
+            INSERT INTO posts (name, description, program_type, is_active)
+            VALUES (?, ?, ?, 1)
+            """, (
+                stage["post_name"],
+                stage["description"],
+                PROGRAM_CAPASKA
+            ))
+            post_id = cur.lastrowid
+
+        capaska_post_ids.append(post_id)
+
+        # Buat minimal 1 parameter per post agar progress stage selalu muncul.
+        # Kalau post sudah punya parameter aktif, jangan duplikasi.
+        cur.execute("""
+        SELECT id
+        FROM parameters
+        WHERE post_id = ?
+          AND is_active = 1
+          AND program_type = ?
+        ORDER BY sort_order ASC, id ASC
+        LIMIT 1
+        """, (
+            post_id,
+            PROGRAM_CAPASKA
+        ))
+        parameter_row = cur.fetchone()
+
+        if parameter_row:
+            parameter_id = parameter_row["id"]
+        else:
+            cur.execute("""
+            INSERT INTO parameters
+            (
+                name,
+                category,
+                post_id,
+                unit,
+                input_type,
+                normal_value,
+                reference_text,
+                reference_image_path,
+                config_json,
+                is_required,
+                is_active,
+                sort_order,
+                program_type
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """, (
+                stage["parameter_name"],
+                stage["post_name"],
+                post_id,
+                "",
+                "select",
+                "Done",
+                "Parameter minimal otomatis untuk menjaga progress stage dan hak akses operator.",
+                "",
+                json.dumps(["", "Done", "Belum", "Normal", "Abnormal", "Perlu Review"]),
+                1,
+                stage["sort_order"],
+                PROGRAM_CAPASKA
+            ))
+            parameter_id = cur.lastrowid
+
+        capaska_parameter_ids.append(parameter_id)
+
+        # Buat / update user operator per post.
+        cur.execute("""
+        SELECT id
+        FROM users
+        WHERE username = ?
+        LIMIT 1
+        """, (stage["username"],))
+        user_row = cur.fetchone()
+
+        if user_row:
+            cur.execute("""
+            UPDATE users
+            SET name = ?,
+                role = 'operator',
+                post_id = ?,
+                program_type = ?,
+                is_active = 1
+            WHERE id = ?
+            """, (
+                stage["operator_name"],
+                post_id,
+                PROGRAM_CAPASKA,
+                user_row["id"]
+            ))
+        else:
+            cur.execute("""
+            INSERT INTO users
+            (
+                name,
+                username,
+                password,
+                role,
+                post_id,
+                program_type,
+                is_active
+            )
+            VALUES (?, ?, ?, 'operator', ?, ?, 1)
+            """, (
+                stage["operator_name"],
+                stage["username"],
+                stage["password"],
+                post_id,
+                PROGRAM_CAPASKA
+            ))
+
+    # Mapping semua parameter CAPASKA ke semua package CAPASKA agar:
+    # - parameter muncul pada operator sesuai post
+    # - progress stage selalu lengkap
+    cur.execute("""
+    SELECT id
+    FROM packages
+    WHERE program_type = ?
+      AND is_active = 1
+    """, (PROGRAM_CAPASKA,))
+    capaska_packages = cur.fetchall()
+
+    for package_row in capaska_packages:
+        package_id_for_map = package_row["id"]
+
+        cur.execute("""
+        SELECT parameters.id AS parameter_id
+        FROM parameters
+        JOIN posts ON posts.id = parameters.post_id
+        WHERE parameters.program_type = ?
+          AND posts.program_type = ?
+          AND parameters.is_active = 1
+          AND posts.name != 'Admin'
+        """, (
+            PROGRAM_CAPASKA,
+            PROGRAM_CAPASKA
+        ))
+
+        parameters_to_map = cur.fetchall()
+
+        for param_row in parameters_to_map:
+            parameter_id_for_map = param_row["parameter_id"]
+
+            cur.execute("""
+            SELECT id
+            FROM package_parameters
+            WHERE package_id = ?
+              AND parameter_id = ?
+            LIMIT 1
+            """, (
+                package_id_for_map,
+                parameter_id_for_map
+            ))
+
+            existing_map = cur.fetchone()
+
+            if not existing_map:
+                cur.execute("""
+                INSERT INTO package_parameters (package_id, parameter_id, sort_order)
+                VALUES (?, ?, 0)
+                """, (
+                    package_id_for_map,
+                    parameter_id_for_map
+                ))
+
+
     # Default account untuk dokter/supervisor review CAPASKA.
     # Dibuat otomatis jika belum ada agar user bisa langsung testing fitur Review Hasil.
     cur.execute("""
@@ -1632,6 +1911,44 @@ def get_or_create_package_id(name, company_id, program_type=PROGRAM_CAPASKA, des
     """, (clean_name, description, company_id, program_type))
 
     package_id = cur.lastrowid
+
+    # Mapping cepat: jika package baru CAPASKA dibuat otomatis saat import,
+    # hubungkan langsung ke semua parameter CAPASKA yang sudah ada.
+    if program_type == PROGRAM_CAPASKA:
+        cur.execute("""
+        SELECT parameters.id AS parameter_id
+        FROM parameters
+        JOIN posts ON posts.id = parameters.post_id
+        WHERE parameters.program_type = ?
+          AND posts.program_type = ?
+          AND parameters.is_active = 1
+          AND posts.name != 'Admin'
+        """, (
+            PROGRAM_CAPASKA,
+            PROGRAM_CAPASKA
+        ))
+
+        for param_row in cur.fetchall():
+            cur.execute("""
+            SELECT id
+            FROM package_parameters
+            WHERE package_id = ?
+              AND parameter_id = ?
+            LIMIT 1
+            """, (
+                package_id,
+                param_row["parameter_id"]
+            ))
+
+            if not cur.fetchone():
+                cur.execute("""
+                INSERT INTO package_parameters (package_id, parameter_id, sort_order)
+                VALUES (?, ?, 0)
+                """, (
+                    package_id,
+                    param_row["parameter_id"]
+                ))
+
     conn.commit()
     conn.close()
 
@@ -2618,11 +2935,44 @@ def import_instansi_excel(
             "Jika Putra/Putri tidak ada, sistem memakai kolom Nama Peserta/Nama Lengkap/Nama/Peserta.",
             "Kolom yang tidak ada akan diabaikan.",
             "Namun minimal tetap wajib ada satu kolom nama peserta.",
+            "Mode cloud: import dipercepat, QR dibuat saat cetak label.",
         ],
     }
 
     conn = get_connection()
     cur = conn.cursor()
+
+    # Supabase performance patch:
+    # Jangan SELECT mcu_id terakhir setiap baris. Ambil sekali per tahun, lalu increment lokal.
+    mcu_year_counters = {}
+
+    def next_mcu_id_fast(year_value):
+        year_str = str(year_value or datetime.now().year)
+        prefix = f"CAPASKA-{year_str}"
+
+        if year_str not in mcu_year_counters:
+            cur.execute("""
+            SELECT mcu_id
+            FROM participants
+            WHERE mcu_id LIKE ?
+            ORDER BY mcu_id DESC
+            LIMIT 1
+            """, (f"{prefix}-%",))
+
+            row = cur.fetchone()
+
+            if not row or not row["mcu_id"]:
+                mcu_year_counters[year_str] = 1
+            else:
+                try:
+                    mcu_year_counters[year_str] = int(str(row["mcu_id"]).split("-")[-1]) + 1
+                except Exception:
+                    mcu_year_counters[year_str] = 1
+
+        next_number = mcu_year_counters[year_str]
+        mcu_year_counters[year_str] += 1
+
+        return f"{prefix}-{next_number:04d}"
 
     for sheet_item in parsed_sheets:
         df = sheet_item["df"]
@@ -2760,42 +3110,100 @@ def import_instansi_excel(
                 continue
 
             for candidate in candidates:
-                result = insert_or_update_imported_participant(
-                    cur=cur,
-                    source_id=source_id,
-                    package_id=package_id,
-                    company_id=company_id,
-                    name=candidate["name"],
-                    gender=candidate["gender"],
-                    province=candidate["province"],
-                    service_date=service_date,
-                    exam_type=exam_type,
-                    doctor_assigned=doctor,
-                    nurse_assigned=nurse,
-                )
+                # Supabase/Streamlit Cloud fast path:
+                # Import database selalu membuat source_id baru, jadi tidak perlu SELECT cek existing per baris.
+                # External ID dan NIK langsung masuk saat INSERT, tidak UPDATE terpisah.
+                if using_postgres():
+                    if service_date:
+                        try:
+                            year = str(pd.to_datetime(service_date).year)
+                        except Exception:
+                            year = str(datetime.now().year)
+                    else:
+                        year = str(datetime.now().year)
 
-                # Update optional external_id dan nik kalau ada.
-                if external_id or nik:
+                    mcu_id = next_mcu_id_fast(year)
+
                     cur.execute("""
-                    UPDATE participants
-                    SET
-                        external_id = COALESCE(NULLIF(?, ''), external_id),
-                        nik = COALESCE(NULLIF(?, ''), nik)
-                    WHERE source_id = ?
-                      AND UPPER(TRIM(name)) = UPPER(TRIM(?))
-                      AND UPPER(TRIM(COALESCE(gender, ''))) = UPPER(TRIM(COALESCE(?, '')))
-                    """, (
+                    INSERT INTO participants
+                    (
+                        mcu_id,
                         external_id,
+                        name,
                         nik,
+                        gender,
+                        birth_date,
+                        company_id,
+                        package_id,
+                        mcu_date,
+                        program_type,
                         source_id,
+                        province,
+                        service_date,
+                        exam_type,
+                        doctor_assigned,
+                        nurse_assigned,
+                        barcode_value
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        mcu_id,
+                        external_id,
                         candidate["name"],
+                        nik,
                         candidate["gender"],
+                        "",
+                        company_id,
+                        package_id,
+                        service_date,
+                        PROGRAM_CAPASKA,
+                        source_id,
+                        candidate["province"],
+                        service_date,
+                        exam_type,
+                        doctor,
+                        nurse,
+                        mcu_id
                     ))
 
-                if result == "created":
                     stats["participants_created"] += 1
                 else:
-                    stats["participants_updated"] += 1
+                    result = insert_or_update_imported_participant(
+                        cur=cur,
+                        source_id=source_id,
+                        package_id=package_id,
+                        company_id=company_id,
+                        name=candidate["name"],
+                        gender=candidate["gender"],
+                        province=candidate["province"],
+                        service_date=service_date,
+                        exam_type=exam_type,
+                        doctor_assigned=doctor,
+                        nurse_assigned=nurse,
+                    )
+
+                    # Update optional external_id dan nik kalau ada.
+                    if external_id or nik:
+                        cur.execute("""
+                        UPDATE participants
+                        SET
+                            external_id = COALESCE(NULLIF(?, ''), external_id),
+                            nik = COALESCE(NULLIF(?, ''), nik)
+                        WHERE source_id = ?
+                          AND UPPER(TRIM(name)) = UPPER(TRIM(?))
+                          AND UPPER(TRIM(COALESCE(gender, ''))) = UPPER(TRIM(COALESCE(?, '')))
+                        """, (
+                            external_id,
+                            nik,
+                            source_id,
+                            candidate["name"],
+                            candidate["gender"],
+                        ))
+
+                    if result == "created":
+                        stats["participants_created"] += 1
+                    else:
+                        stats["participants_updated"] += 1
 
     conn.commit()
     conn.close()
@@ -3397,7 +3805,24 @@ def get_stage_progress(participant_id, package_id):
         item["is_done"] = is_done
         item["status_text"] = "Done" if is_done else "Belum"
         item["progress_text"] = progress_text
+
+        stage_name_key = str(item.get("post_name") or "").strip().lower()
+        stage_order_map = {
+            "registrasi capaska": 10,
+            "kesehatan mata": 20,
+            "penyakit dalam": 30,
+            "kesehatan gigi & mulut + dental panoramik": 40,
+            "kesehatan tht": 50,
+            "kesehatan jantung dan pembuluh darah": 60,
+            "ortopedi": 70,
+            "radiologi": 80,
+            "review dokter capaska": 900,
+        }
+        item["stage_order"] = stage_order_map.get(stage_name_key, 500)
+
         stages.append(item)
+
+    stages = sorted(stages, key=lambda row: (row.get("stage_order", 500), row.get("post_id", 0)))
     return stages
 
 
@@ -4678,11 +5103,12 @@ if st.session_state.user is None:
     - gigi / gigi123
     - dokter / dokter123
 
-    CAPASKA contoh:
+    CAPASKA operator:
+    - capaska_registrasi / registrasi123
     - capaska_mata / mata123
+    - capaska_pd / pd123
     - capaska_gigi / gigi123
     - capaska_tht / tht123
-    - capaska_pd / pd123
     - capaska_jantung / jantung123
     - capaska_ortopedi / ortopedi123
     - capaska_radiologi / radiologi123
@@ -4754,10 +5180,17 @@ def get_menu_options_for_user(user, user_program):
 
 
 def render_hamburger_menu(user, user_program):
+    """
+    Menu dibuat manual-submit agar tidak langsung ganti halaman setiap radio berubah.
+    Streamlit tetap rerun saat submit, tetapi pilihan menu tidak diproses sampai user klik tombol.
+    """
     menu_options = get_menu_options_for_user(user, user_program)
 
     if "main_menu" not in st.session_state or st.session_state.main_menu not in menu_options:
         st.session_state.main_menu = menu_options[0]
+
+    if "pending_main_menu" not in st.session_state or st.session_state.pending_main_menu not in menu_options:
+        st.session_state.pending_main_menu = st.session_state.main_menu
 
     st.markdown('<div class="top-menu-shell">', unsafe_allow_html=True)
 
@@ -4773,11 +5206,25 @@ def render_hamburger_menu(user, user_program):
                 st.markdown(f"**Program:** {program_label(user_program)}")
                 st.divider()
 
-                st.radio(
-                    "Pilih Menu",
-                    menu_options,
-                    key="main_menu"
-                )
+                with st.form("main_menu_manual_form", clear_on_submit=False):
+                    current_index = menu_options.index(st.session_state.main_menu) if st.session_state.main_menu in menu_options else 0
+
+                    selected_menu = st.radio(
+                        "Pilih Menu",
+                        menu_options,
+                        index=current_index,
+                        key="pending_main_menu_radio"
+                    )
+
+                    open_menu_clicked = st.form_submit_button(
+                        "Buka Menu",
+                        use_container_width=True
+                    )
+
+                    if open_menu_clicked:
+                        st.session_state.main_menu = selected_menu
+                        st.session_state.pending_main_menu = selected_menu
+                        st.rerun()
         else:
             with st.expander("☰ MENU UTAMA", expanded=False):
                 st.markdown("### Menu")
@@ -4787,11 +5234,25 @@ def render_hamburger_menu(user, user_program):
                 st.markdown(f"**Program:** {program_label(user_program)}")
                 st.divider()
 
-                st.radio(
-                    "Pilih Menu",
-                    menu_options,
-                    key="main_menu"
-                )
+                with st.form("main_menu_manual_form_fallback", clear_on_submit=False):
+                    current_index = menu_options.index(st.session_state.main_menu) if st.session_state.main_menu in menu_options else 0
+
+                    selected_menu = st.radio(
+                        "Pilih Menu",
+                        menu_options,
+                        index=current_index,
+                        key="pending_main_menu_radio_fallback"
+                    )
+
+                    open_menu_clicked = st.form_submit_button(
+                        "Buka Menu",
+                        use_container_width=True
+                    )
+
+                    if open_menu_clicked:
+                        st.session_state.main_menu = selected_menu
+                        st.session_state.pending_main_menu = selected_menu
+                        st.rerun()
 
     with col_context:
         st.markdown(
