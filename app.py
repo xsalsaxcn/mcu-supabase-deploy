@@ -2813,7 +2813,11 @@ def import_instansi_excel(
             f"Detail kolom yang terbaca: {stats.get('detected_columns')}"
         )
 
-    stats["barcodes_ready"] = ensure_barcodes_for_source(source_id)
+    # Supabase/Streamlit Cloud performance:
+    # Jangan generate semua QR/barcode saat import karena lambat untuk banyak peserta.
+    # Barcode akan dibuat otomatis saat peserta dibuka atau saat admin cetak label.
+    stats["barcodes_ready"] = 0
+    stats["barcode_generation_mode"] = "on_demand"
 
     return stats
 
