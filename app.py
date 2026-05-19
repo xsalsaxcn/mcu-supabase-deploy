@@ -2910,16 +2910,19 @@ def ensure_barcode_for_participant(participant_id):
         if generated_path:
             barcode_image_path = generated_path
 
+    barcode_created_at_value = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     cur.execute("""
     UPDATE participants
     SET
         barcode_value = ?,
         barcode_image_path = COALESCE(NULLIF(?, ''), barcode_image_path),
-        barcode_created_at = COALESCE(barcode_created_at, CURRENT_TIMESTAMP)
+        barcode_created_at = COALESCE(NULLIF(barcode_created_at, ''), ?)
     WHERE id = ?
     """, (
         barcode_value,
         barcode_image_path or "",
+        barcode_created_at_value,
         participant_id
     ))
 
