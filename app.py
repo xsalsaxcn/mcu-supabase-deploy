@@ -1,6 +1,4 @@
 import json
-import os
-import re
 import secrets
 import sqlite3
 from datetime import date, datetime
@@ -29,45 +27,14 @@ except Exception:
     canvas = None
     REPORTLAB_AVAILABLE = False
 
-try:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-    POSTGRES_AVAILABLE = True
-except Exception:
-    psycopg2 = None
-    RealDictCursor = None
-    POSTGRES_AVAILABLE = False
+from capaska_importer import import_capaska_excel
+from capaska_forms import render_capaska_form
 
-try:
-    from capaska_importer import import_capaska_excel
-except Exception:
-    def import_capaska_excel(*args, **kwargs):
-        raise RuntimeError(
-            "Module capaska_importer.py belum tersedia. "
-            "Upload file capaska_importer.py ke repo jika ingin memakai fitur Import Hasil Pemeriksaan CAPASKA."
-        )
-
-try:
-    from capaska_forms import render_capaska_form
-except Exception:
-    def render_capaska_form(*args, **kwargs):
-        return False
-
-# =========================
-# DATABASE MODE
-# =========================
-# Default: SQLite lokal.
-# Untuk Streamlit Community Cloud + Supabase, isi secrets:
-# SUPABASE_DB_URL = "postgresql://postgres.xxx:password@aws-0-xxx.pooler.supabase.com:6543/postgres"
-# atau:
-# [database]
-# url = "postgresql://..."
-DB_PATH = Path(os.getenv("SQLITE_DB_PATH", "mcu.db"))
-
-EXPORT_DIR = Path(os.getenv("EXPORT_DIR", "exports"))
-REFERENCE_UPLOAD_DIR = Path(os.getenv("REFERENCE_UPLOAD_DIR", "uploads/reference_images"))
-BARCODE_DIR = Path(os.getenv("BARCODE_DIR", "uploads/barcodes"))
-LABEL_PDF_DIR = Path(os.getenv("LABEL_PDF_DIR", "exports/labels"))
+DB_PATH = Path("mcu.db")
+EXPORT_DIR = Path("exports")
+REFERENCE_UPLOAD_DIR = Path("uploads/reference_images")
+BARCODE_DIR = Path("uploads/barcodes")
+LABEL_PDF_DIR = Path("exports/labels")
 
 PROGRAM_CORPORATE = "corporate"
 PROGRAM_CAPASKA = "capaska"
@@ -959,193 +926,19 @@ inject_modern_ui()
 
 
 
-
-# =========================
-# DATABASE CONNECTION
-# SQLite lokal atau Supabase PostgreSQL
-# =========================
-
-POSTGRES_ID_TABLES = {
-    "companies",
-    "posts",
-    "packages",
-    "users",
-    "parameters",
-    "package_parameters",
-    "participants",
-    "examination_results",
-    "audit_logs",
-    "participant_sources",
-    "participant_reviews",
-}
-
-
-def get_supabase_db_url():
-    # Prioritas: Streamlit secrets, lalu environment variable.
-    try:
-        if "SUPABASE_DB_URL" in st.secrets:
-            return str(st.secrets["SUPABASE_DB_URL"]).strip()
-    except Exception:
-        pass
-
-    try:
-        if "database" in st.secrets and "url" in st.secrets["database"]:
-            return str(st.secrets["database"]["url"]).strip()
-    except Exception:
-        pass
-
-    return os.getenv("SUPABASE_DB_URL", "").strip()
-
-
-def using_postgres():
-    return bool(get_supabase_db_url())
-
-
-class PgCursorAdapter:
-    def __init__(self, cursor):
-        self.cursor = cursor
-        self.lastrowid = None
-        self._last_returned_row = None
-
-    def _convert_sql(self, sql):
-        q = sql.strip()
-
-        # SQLite -> PostgreSQL placeholder
-        q = q.replace("?", "%s")
-
-        # SQLite INSERT OR IGNORE -> PostgreSQL ON CONFLICT DO NOTHING
-        if re.match(r"(?is)^\s*INSERT\s+OR\s+IGNORE\s+INTO\s+", q):
-            q = re.sub(r"(?is)^\s*INSERT\s+OR\s+IGNORE\s+INTO\s+", "INSERT INTO ", q)
-            if "ON CONFLICT" not in q.upper():
-                q = q.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
-
-        # SQLite AUTOINCREMENT DDL -> PostgreSQL SERIAL
-        q = re.sub(
-            r"(?is)INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT",
-            "SERIAL PRIMARY KEY",
-            q
-        )
-
-        # SQLite rowid-style bool is still integer; no action needed.
-
-        return q
-
-    def _maybe_add_returning_id(self, sql):
-        q = sql.strip()
-        upper = q.upper()
-
-        if not upper.startswith("INSERT INTO"):
-            return q
-
-        if " RETURNING " in upper:
-            return q
-
-        # Jangan tambah RETURNING untuk UPSERT kompleks.
-        if " ON CONFLICT " in upper:
-            return q
-
-        m = re.match(r"(?is)INSERT\s+INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)", q)
-        if not m:
-            return q
-
-        table = m.group(1)
-
-        if table not in POSTGRES_ID_TABLES:
-            return q
-
-        return q.rstrip().rstrip(";") + " RETURNING id"
-
-    def execute(self, sql, params=None):
-        params = params or ()
-        q = self._convert_sql(sql)
-        q = self._maybe_add_returning_id(q)
-
-        self._last_returned_row = None
-        self.lastrowid = None
-
-        self.cursor.execute(q, params)
-
-        if q.strip().upper().startswith("INSERT INTO") and " RETURNING ID" in q.upper():
-            try:
-                row = self.cursor.fetchone()
-                self._last_returned_row = row
-                if row and "id" in row:
-                    self.lastrowid = row["id"]
-            except Exception:
-                self._last_returned_row = None
-                self.lastrowid = None
-
-        return self
-
-    def executemany(self, sql, seq_of_params):
-        q = self._convert_sql(sql)
-        self.cursor.executemany(q, seq_of_params)
-        return self
-
-    def fetchone(self):
-        if self._last_returned_row is not None:
-            row = self._last_returned_row
-            self._last_returned_row = None
-            return row
-        return self.cursor.fetchone()
-
-    def fetchall(self):
-        return self.cursor.fetchall()
-
-    def close(self):
-        return self.cursor.close()
-
-
-class PgConnectionAdapter:
-    def __init__(self, dsn):
-        self.conn = psycopg2.connect(dsn, cursor_factory=RealDictCursor)
-
-    def cursor(self):
-        return PgCursorAdapter(self.conn.cursor())
-
-    def commit(self):
-        self.conn.commit()
-
-    def rollback(self):
-        self.conn.rollback()
-
-    def close(self):
-        self.conn.close()
-
-
 def get_connection():
-    if using_postgres():
-        if not POSTGRES_AVAILABLE:
-            st.error("psycopg2-binary belum terinstall. Tambahkan psycopg2-binary ke requirements.txt.")
-            st.stop()
-        return PgConnectionAdapter(get_supabase_db_url())
-
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def check_database_exists():
-    # Supabase/PostgreSQL tidak memakai file mcu.db.
-    if using_postgres():
-        return
-
     if not DB_PATH.exists():
         st.error("Database mcu.db belum ditemukan. Jalankan dulu: python init_db.py")
         st.stop()
 
 
 def column_exists(cur, table_name, column_name):
-    if using_postgres():
-        cur.execute("""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = %s
-          AND column_name = %s
-        """, (table_name, column_name))
-        return cur.fetchone() is not None
-
     cur.execute(f"PRAGMA table_info({table_name})")
     columns = [row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()]
     return column_name in columns
@@ -1156,201 +949,7 @@ def add_column_if_not_exists(cur, table_name, column_name, definition):
         cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
 
-def ensure_postgres_base_schema():
-    if not using_postgres():
-        return
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    schema_sql = [
-        """
-        CREATE TABLE IF NOT EXISTS companies (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            address TEXT,
-            pic_name TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS posts (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            is_active INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            program_type TEXT DEFAULT 'corporate'
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS packages (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            company_id INTEGER,
-            is_active INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            program_type TEXT DEFAULT 'corporate'
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL,
-            post_id INTEGER,
-            is_active INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            program_type TEXT DEFAULT 'corporate'
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS parameters (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            category TEXT,
-            post_id INTEGER,
-            unit TEXT,
-            input_type TEXT,
-            normal_value TEXT,
-            reference_text TEXT,
-            reference_image_path TEXT,
-            config_json TEXT,
-            is_required INTEGER DEFAULT 0,
-            is_active INTEGER DEFAULT 1,
-            sort_order INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            program_type TEXT DEFAULT 'corporate'
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS package_parameters (
-            id SERIAL PRIMARY KEY,
-            package_id INTEGER NOT NULL,
-            parameter_id INTEGER NOT NULL,
-            sort_order INTEGER DEFAULT 0,
-            UNIQUE(package_id, parameter_id)
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS participants (
-            id SERIAL PRIMARY KEY,
-            mcu_id TEXT,
-            external_id TEXT,
-            name TEXT NOT NULL,
-            nik TEXT,
-            gender TEXT,
-            birth_date TEXT,
-            company_id INTEGER,
-            package_id INTEGER,
-            mcu_date TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            source_id INTEGER,
-            province TEXT,
-            service_date TEXT,
-            exam_type TEXT,
-            doctor_assigned TEXT,
-            nurse_assigned TEXT,
-            barcode_value TEXT,
-            barcode_image_path TEXT,
-            barcode_created_at TEXT,
-            program_type TEXT DEFAULT 'corporate'
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS examination_results (
-            id SERIAL PRIMARY KEY,
-            participant_id INTEGER NOT NULL,
-            parameter_id INTEGER NOT NULL,
-            value TEXT,
-            input_by INTEGER,
-            input_post_id INTEGER,
-            updated_by INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(participant_id, parameter_id)
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id SERIAL PRIMARY KEY,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            user_id INTEGER,
-            action TEXT,
-            participant_id INTEGER,
-            parameter_id INTEGER,
-            old_value TEXT,
-            new_value TEXT
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS participant_sources (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            institution_name TEXT,
-            program_type TEXT DEFAULT 'capaska',
-            description TEXT,
-            uploaded_filename TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS auth_sessions (
-            token TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_active INTEGER DEFAULT 1
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS participant_reviews (
-            id SERIAL PRIMARY KEY,
-            participant_id INTEGER NOT NULL UNIQUE,
-            review_status TEXT DEFAULT 'Belum Direview',
-            final_decision TEXT,
-            doctor_note TEXT,
-            reviewed_by INTEGER,
-            reviewed_at TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """,
-    ]
-
-    for sql in schema_sql:
-        cur.execute(sql)
-
-    # Seed minimal agar login pertama bisa dilakukan.
-    cur.execute("SELECT id FROM posts WHERE name = %s LIMIT 1", ("Admin",))
-    admin_post = cur.fetchone()
-
-    if admin_post:
-        admin_post_id = admin_post["id"]
-    else:
-        cur.execute("""
-        INSERT INTO posts (name, description, program_type, is_active)
-        VALUES (%s, %s, %s, 1)
-        """, ("Admin", "Post admin sistem", "all"))
-        admin_post_id = cur.lastrowid
-
-    cur.execute("SELECT id FROM users WHERE username = %s LIMIT 1", ("admin",))
-    admin_user = cur.fetchone()
-
-    if not admin_user:
-        cur.execute("""
-        INSERT INTO users (name, username, password, role, post_id, program_type, is_active)
-        VALUES (%s, %s, %s, %s, %s, %s, 1)
-        """, ("Administrator", "admin", "admin123", "admin", admin_post_id, "all"))
-
-    conn.commit()
-    conn.close()
-
-
 def ensure_runtime_schema():
-    ensure_postgres_base_schema()
     conn = get_connection()
     cur = conn.cursor()
 
@@ -3703,7 +3302,19 @@ def get_participant_progress(program_type=None, source_id=None):
        AND examination_results.value IS NOT NULL
        AND TRIM(examination_results.value) != ''
     WHERE {where_sql}
-    GROUP BY participants.id
+    GROUP BY
+        participants.id,
+        participants.package_id,
+        participants.source_id,
+        participants.mcu_id,
+        participants.external_id,
+        participants.province,
+        participants.name,
+        participants.program_type,
+        companies.name,
+        packages.name,
+        participant_sources.name,
+        participants.mcu_date
     ORDER BY participants.id DESC
     """, params)
 
